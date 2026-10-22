@@ -35,12 +35,21 @@ def mean_squared_error_sgd(y, tx, initial_w, max_iters, gamma):
 
 def least_squares(y, tx):
     """Return (w, loss) using normal equations; do not use numpy.linalg.lstsq."""
-    pass
+    #pass
+    A = tx.T @ tx
+    b = tx.T @ y
+    w = np.linalg.solve(A, b)
+    return (w,compute_mse(y, tx, w))
 
 
 def ridge_regression(y, tx, lambda_):
     """Return (w, loss) using regularized normal equations; returned MSE excludes penalty."""
-    pass
+    #pass
+    N, D = tx.shape
+    A = tx.T @ tx + 2 * N * lambda_ * np.eye(D)
+    b = tx.T @ y 
+    w = np.linalg.solve(A, b)
+    return (w, compute_mse(y, tx, w))
 
 
 def logistic_regression(y, tx, initial_w, max_iters, gamma):
