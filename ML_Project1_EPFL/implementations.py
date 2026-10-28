@@ -39,7 +39,7 @@ def least_squares(y, tx):
     A = tx.T @ tx
     b = tx.T @ y
     w = np.linalg.solve(A, b)
-    return (w,compute_mse(y, tx, w))
+    return w,compute_mse(y, tx, w)
 
 
 def ridge_regression(y, tx, lambda_):
@@ -49,17 +49,26 @@ def ridge_regression(y, tx, lambda_):
     A = tx.T @ tx + 2 * N * lambda_ * np.eye(D)
     b = tx.T @ y 
     w = np.linalg.solve(A, b)
-    return (w, compute_mse(y, tx, w))
+    return w, compute_mse(y, tx, w)
 
 
 def logistic_regression(y, tx, initial_w, max_iters, gamma):
     """Return (w, loss) using gradient descent; labels must be in {0, 1}."""
-    pass
+    w=np.array(initial_w, dtype=float, copy=True)
+    for _ in range(max_iters):
+        gradient = compute_logistic_gradient(y,tx,w)
+        w = w - gamma * gradient
+    return w, compute_logistic_loss(y, tx, w)
+
 
 
 def reg_logistic_regression(y, tx, lambda_, initial_w, max_iters, gamma):
     """Return (w, loss) with L2 penalty lambda_ * ||w||^2; returned loss excludes penalty."""
-    pass
+    w = np.array(initial_w, dtype=float, copy=True)
+    for _ in range(max_iters):
+        gradient = compute_logistic_gradient(y, tx, w) + 2 * lambda_ * w
+        w = w - gamma * gradient
+    return w, compute_logistic_loss(y, tx, w)
 
 
 def compute_mse(y, tx, w):
@@ -75,14 +84,15 @@ def compute_mse_gradient(y, tx, w):
 
 def sigmoid(z):
     """Return the sigmoid of z using a numerically stable calculation."""
-    pass
+    return 1 / (1 + np.exp(-z))
 
 
 def compute_logistic_loss(y, tx, w):
     """Return the unregularized logistic loss using stable numerical operations."""
-    pass
+    p=tx@w
+    return (1/len(y)) * (p *(-y) + np.logaddexp(0,p)).sum(axis=0)
 
 
 def compute_logistic_gradient(y, tx, w):
     """Return the gradient of the unregularized logistic loss."""
-    pass
+    return (1/len(y)) * tx.T @ (sigmoid(tx@w) -y)
