@@ -1,0 +1,449 @@
+================================================================================
+PROJECT 1 - TRIALS LOG
+Last updated: 2026-10-28
+================================================================================
+
+Notes for whoever writes the report. Every number below was measured, not
+estimated. Read the "HOW THESE NUMBERS WERE OBTAINED" section before quoting
+anything, because the CV figures and the AIcrowd figures are on different
+amounts of data.
+
+
+--------------------------------------------------------------------------------
+1. HOW THESE NUMBERS WERE OBTAINED
+--------------------------------------------------------------------------------
+
+"CV F1"  = mean over 5 cross-validation folds, seed 1, measured on a 1-in-10 row
+           subsample of x_train (32,814 rows) to keep experiments to a few
+           seconds each. Use these for RANKING options, not as absolute claims.
+"AIcrowd"= actual submission score on the full test set (109,379 rows).
+"timing" = measured on a full CV training fold (262,508 rows x 173 features).
+
+The subsample ranks options reliably: CV F1 0.393 corresponded to an AIcrowd
+score of 0.403, so the offset is small and consistent.
+
+Preprocessing is always fitted INSIDE each training fold, never on the full
+training set before splitting, so no validation fold leaks into the imputation
+or scaling statistics.
+
+
+--------------------------------------------------------------------------------
+2. DATASET
+--------------------------------------------------------------------------------
+
+Training rows          328,135
+Test rows              109,379
+Raw features               321  (after dropping the Id column)
+Positive rate           8.83%   (so a majority-class classifier gets F1 = 0)
+All-positive baseline  F1 0.156 (useful floor: beating it is not an achievement)
+Missing cells          44.7% of the whole matrix
+
+Columns surviving the default filters: 172 of 321 (>50% missing or zero variance
+are dropped). After also dropping survey metadata: 153.
+
+The data is the CDC BRFSS telephone survey. IMPORTANT for the report: every
+feature is a self-reported questionnaire answer. There are no lab values or
+physical measurements, so "drop the self-reported columns" is not an available
+strategy - it would drop everything.
+
+
+--------------------------------------------------------------------------------
+3. SUBMISSION HISTORY
+--------------------------------------------------------------------------------
+
+AIcrowd F1  Configuration
+----------  --------------------------------------------------------------------
+0.40        First attempt. Plain logistic regression, median imputation, no
+            metadata filtering, threshold 0.15.
+0.403       Regularized logistic regression, lambda=1, threshold=0.4, metadata
+            dropped, missing values set to 0 instead of the median.
+
+Best teams are reported around 0.45, so roughly 0.05 of F1 is unaccounted for.
+
+
+--------------------------------------------------------------------------------
+4. THE SINGLE MOST IMPORTANT DIAGNOSTIC
+--------------------------------------------------------------------------------
+
+CV F1 was 0.393 and the AIcrowd score was 0.403. THEY MATCH.
+
+This rules out overfitting completely. More regularization, more folds and more
+data cannot help. Every remaining gain has to come from either a better feature
+representation or a better-converged optimizer. This is worth stating explicitly
+in the report, because it justifies not spending any more effort on lambda.
+
+
+--------------------------------------------------------------------------------
+5. HYPERPARAMETERS - CONCLUSION: LAMBDA DOES NOT MATTER HERE
+--------------------------------------------------------------------------------
+
+With N = 328,135 and D = 173, the ratio N/D is about 1,900. There is essentially
+no variance for L2 to control, so regularization can only shrink useful signal.
+
+Coarse grid, original preprocessing, best threshold per lambda:
+
+  lambda    0.1     0.5     1.0     2.0     5.0
+  CV F1   0.3748  0.3665  0.3775  0.3599  0.3406      <- flat, then declining
+
+Fine threshold sweep, 153 features:
+
+  lambda=0.0    CV F1 0.4022 @ threshold 0.20    mean predicted p = 0.0847
+  lambda=0.01   CV F1 0.4009 @ threshold 0.26    mean predicted p = 0.1285
+  lambda=0.1    CV F1 0.3934 @ threshold 0.39
+
+lambda=0 is both the best score AND the only properly calibrated model: its mean
+predicted probability 0.0847 matches the true base rate 0.0846. Regularization
+shrinks the weights toward zero, which pulls probabilities toward 0.5, which is
+why a regularized model needs an artificially high threshold (0.39) to score at
+all. SWITCHING FROM lambda=1 TO lambda=0 IS WORTH ABOUT +0.01 F1 ON ITS OWN.
+
+Learning rate, full data, lambda=0, 500 iterations:
+
+  gamma      0.1      1.0      5.0      20.0
+  loss     0.22923  0.22576  0.69667  1.28959      (loss at w=0 is 0.69315)
+
+gamma=1.0 extracts the most per iteration. gamma>=5 diverges. Note also that
+with gamma=0.1 the L2 shrink factor per step is (1 - 2*gamma*lambda), which is
+exactly 0 at lambda=5 - the weights are annihilated every step. That is an
+interaction between gamma and lambda worth a sentence in the report.
+
+THRESHOLD IS THE BIGGEST SINGLE LEVER. At 8.8% prevalence:
+
+  F1 at threshold 0.50 = 0.1556   (i.e. the all-positive baseline)
+  F1 at threshold 0.20 = 0.4022
+
+A fine sweep costs nothing, because the threshold plays no part in training:
+cache each fold's predicted probabilities once and re-threshold them.
+
+
+--------------------------------------------------------------------------------
+6. PREPROCESSING TRIALS
+--------------------------------------------------------------------------------
+
+6a. SURVEY METADATA REMOVAL  [IMPLEMENTED]
+
+321 raw columns include record identifiers and sampling-design variables that
+were being standardized and fed to the model as predictors:
+
+  SEQNO     21,780 distinct values    record sequence number
+  _PSU      21,780 distinct values    primary sampling unit
+  _LLCPWT  216,913 distinct values    post-stratification survey weight
+  _WT2RAKE   5,528 distinct           raking weight
+  _STSTR     1,306 distinct           sample stratum
+  IDATE        414 distinct           interview date
+  _STATE        53 distinct           FIPS code, used as a continuous magnitude
+
+28 such columns were identified by name, 19 of which were surviving the
+missingness filter. Dropping them takes 172 features down to 153.
+
+Result: CV F1 0.3963 -> 0.3934. NEUTRAL (within fold noise). Justify this change
+on correctness and parsimony, not accuracy. _RFHLTH, MSCODE and HHADULT were
+checked and deliberately KEPT - they are genuine health/demographic variables.
+
+6b. MISSING VALUES: 0 INSTEAD OF MEDIAN  [IMPLEMENTED]
+
+Changed from median imputation to setting missing entries to 0 AFTER
+standardization. Because the column is centred, 0 is exactly the position of the
+column mean, so a missing answer contributes nothing to the linear score instead
+of asserting a value. Mean and std are now computed with nanmean/nanstd over
+observed values only.
+
+Result: folded into the 6a measurement above. NEUTRAL on F1.
+
+Note for the report: imputing a RAW 0 before standardizing would be wrong - 0 is
+outside the valid range of most of these variables (GENHLTH runs 1-5).
+
+6c. SENTINEL CODE RECODING  [IMPLEMENTED]  <-- THE ONE CHANGE THAT HELPED
+
+BRFSS codes "don't know" and "refused" with a numeric code just above each
+variable's valid range, and the code DIFFERS PER VARIABLE. Left in place they
+reach the model as magnitudes.
+
+Worked example, GENHLTH ("is your health excellent / very good / good / fair /
+poor", coded 1-5, with 7 = don't know and 9 = refused). Fitting logistic
+regression on this single column (mean 2.5720, std 1.1147, fitted slope +0.7988):
+
+  raw   standardized   model predicts   observed rate   error
+   5       +2.1782         0.2981           0.3190     -0.0209
+   7       +3.9725         0.6404           0.1708     +0.4696   <- sentinel
+   9       +5.7667         0.8819           0.1420     +0.7399   <- sentinel
+
+The model predicts an 88% chance of heart disease for someone who merely refused
+to answer, against an observed 14%. The mechanism is worth a sentence in the
+report: the model learns one rule on the real 1-5 range (each +1 standardized
+unit multiplies the ODDS by e^0.7988 = 2.22x) and then extrapolates it 3.6 sigma
+beyond the worst real category, where 17.6x odds growth produces 88%. A linear
+model is linear in log-odds and therefore exponential in odds, so a point placed
+far outside the observed range gets an extreme probability. Note the observed
+relationship is NOT monotone (it rises 1->5 then falls at 7 and 9) while the
+model's prediction is forced to be monotone, so no single coefficient can fit
+both the real scale and the sentinels.
+
+DETECTION: the codes are HARDCODED from the official BRFSS 2015 codebook, not
+inferred from the data. See section 6e for how the table was built and why.
+
+Five ways of handling them, fine threshold sweep, lambda=0, gamma=1, 500 iters.
+A-E used a data-inferred rule; the final row is the implemented codebook version:
+
+  A  leave as magnitudes (the old behaviour)          D=154   CV F1 0.4022 @ 0.20
+  B  exclude from mean/std, still pass the value      D=154   CV F1 0.2220 @ 0.02
+  C  recode to missing -> 0 after standardizing       D=152   CV F1 0.4213 @ 0.18
+  D  as C, plus one refused-flag column per feature   D=264   CV F1 0.4196 @ 0.19
+  E  as C, plus per-row refused/never-asked counts    D=154   CV F1 0.4219 @ 0.19
+  -- implemented: codebook codes + metadata + counts  D=154   CV F1 0.4195 @ 0.19
+     against its own baseline (no recode, no metadata) D=175   CV F1 0.4032 @ 0.19
+
+CONCLUSION: +0.016 CV F1. The codebook version and the inferred version (0.4195
+vs 0.4219) are within fold noise of each other; the codebook one is used because
+it is defensible rather than heuristic. Expect roughly 0.42 on AIcrowd given the
+observed CV-to-leaderboard offset.
+
+Why B is catastrophic, which is a good result to report: the sentinels were
+inflating the standard deviation and thereby COMPRESSING themselves. Take them
+out of the statistics but keep passing the value, and the std shrinks, so the
+refusal lands even further out. Any finite number assigned to a refusal is a
+claim about where that person sits on the health axis; only 0 after centring (the
+column mean) says "no information", because the term then drops out of w . z.
+
+6d. DOES RECODING CONFLATE "REFUSED" WITH "NEVER ASKED"?
+
+Yes, and we measured whether it costs anything. Options D and E above preserve
+the distinction and gain nothing (0.4196 and 0.4219 vs C's 0.4213).
+
+The raw association is nonetheless real and worth reporting:
+
+  rows with 0 refused answers    ->  4.22% positive
+  rows with >=3 refused answers  -> 10.16% positive    (2.4x)
+  never-asked count, bottom quartile 9.21% vs top quartile 9.90%  (no signal)
+
+So refusal frequency genuinely correlates with the outcome, but it adds no
+predictive value beyond the existing features - the signal is mediated by
+observed covariates such as age and general health. Structural missingness
+carries almost nothing on its own, which makes sense: BRFSS skip logic means
+"never asked" is nearly determined by a gating question that is itself a feature
+(e.g. BPMEDS is only asked of people who reported high blood pressure).
+
+Both count columns are nevertheless kept in the pipeline: they cost 2 columns and
+they are what preserves the distinction, which is easier to defend than silently
+discarding it.
+
+6e. WHERE THE SENTINEL TABLE COMES FROM  [brfss_codebook.py]
+
+The codes are taken from the official CDC BRFSS 2015 documentation, not guessed
+from the data. Two SAS files had to be joined, because the format names are
+scrambled versions of the variable names:
+
+  https://www.cdc.gov/brfss/annual_data/2015/files/Formas15.sas   variable -> format
+  https://www.cdc.gov/brfss/annual_data/2015/files/Format15.sas   format -> value labels
+
+e.g. SMOKDAY2 -> SMOK2DAY., ALCDAY5 -> ALC5DAY., WEIGHT2 -> WEIGHT.
+
+A numeric code is taken as a sentinel when its codebook label is not-answered
+wording ("Don't know / Not sure", "Refused", "Don't know/Refused/Missing"). Real
+answers are kept even when their label contains one of those words - "Doctor
+refused when asked" (code 3) and "Missing Fruit responses" (code 1) are real
+values and are correctly excluded.
+
+Result: 242 of our 321 columns get a code list, covering 1.40% of all cells. The
+49 columns with no format assignment at all are identifiers and continuous
+quantities (IDATE, SEQNO, _PSU, _STSTR, _STRWT, NUMADULT, ...), most of which the
+metadata filter removes anyway.
+
+The per-variable codes really do differ, which is why one global rule cannot work:
+
+  GENHLTH    7, 9           1-5 scale
+  PHYSHLTH   77, 99         0-30 day count, so 7 and 9 are REAL day counts
+  WEIGHT2    7777, 9999     pounds
+  ALCDAY5    777, 999
+  CHILDREN   99
+  _AGE65YR   3              1 = 18-64, 2 = 65+, 3 = don't know/refused
+  _AGEG5YR   14             1-13 are five-year age bands, 14 = don't know/refused
+  _DRNKWEK   99900
+
+WORTH REPORTING: we first tried to INFER the sentinels from the data, with the
+rule "a code is a sentinel when the value just below it is absent from the
+column". That rule is structurally incapable of finding _AGE65YR = 3 or
+_AGEG5YR = 14, because those codes follow their real values with no gap. An
+earlier, cruder version of the rule ("7 and 9 are sentinels when nothing exceeds
+6") was worse still: it fires on PHYSHLTH and would have destroyed real day
+counts. Reading the codebook was the right call.
+
+
+--------------------------------------------------------------------------------
+7. THINGS THAT DID NOT WORK
+--------------------------------------------------------------------------------
+
+Negative results, all worth a paragraph in the report because they say something
+about the limits of fixed-step gradient descent.
+
+7a. ONE-HOT ENCODING THE CATEGORICALS - FAILED BADLY
+
+97 of the 172 surviving columns have 3-10 distinct values and 16 have 11-50, so
+they are categorical codes being forced into a monotone linear response. One-hot
+encoding should have helped, and would also have solved the sentinel problem for
+free (code 9 simply becomes its own indicator column, no codebook needed).
+
+  one-hot <=12 levels, NaN flags, raw 0/1 dummies     925 features  CV F1 0.2159
+  one-hot <=25 levels                                1062 features  CV F1 0.2001
+  standardized dummies, one level dropped per group,
+    gamma=1, 500 iterations                           772 features  CV F1 0.2564
+  same, 3000 iterations                               772 features  CV F1 0.2595
+  same, gamma=3, 3000 iterations                      772 features  CV F1 0.2682
+
+ROOT CAUSE: conditioning. A dummy for a level present in 0.1% of rows becomes
+99.9% of rows at -0.03 and 0.1% of rows at +31.6 once standardized. That wrecks
+the Hessian's condition number, and gradient descent with a single step size
+converges along those directions far too slowly - note how little 3000 iterations
+buys over 500. The optimal threshold hitting the floor of the sweep (0.05-0.09)
+with mean predicted p well below the base rate is the signature of a model that
+has not converged, not one that is overfitting.
+
+Restricting one-hot to levels with decent support (say >=1% of rows) would keep
+the conditioning sane and is the obvious thing to try next.
+
+7b. QUADRATIC TERMS - FAILED
+
+  original features + squared continuous terms      203 features  CV F1 0.3342
+  sentinels recoded + squared terms                 199 features  CV F1 0.3167
+  same, 2000 iterations                             199 features  CV F1 0.3655
+
+Same conditioning failure: squaring a standardized column produces an extremely
+skewed distribution.
+
+7c. CLASS BALANCING - NO EFFECT
+
+Undersampled the majority class in each TRAINING fold only, keeping validation
+folds at the true class ratio.
+
+  negatives per positive    1:1     2:1     4:1     8:1    true ratio
+  CV F1                   0.3551  0.3744  0.3916  0.4023    0.4022
+  best threshold            0.70    0.62    0.40    0.24      0.20
+
+Balancing only relocates the optimal threshold; it does not change achievable F1.
+That is exactly what theory predicts for a calibrated model, and it is a clean
+result to report given how often undersampling is recommended for imbalanced
+data. It is however 5.6x faster to train, so it is useful for rapid iteration.
+
+
+--------------------------------------------------------------------------------
+8. BUGS FOUND AND FIXED
+--------------------------------------------------------------------------------
+
+Listed because several of them invalidate earlier results, and the methodology
+section should be honest about what was being measured when.
+
+8a. Argument order in the cross-validation call. The lambda passed (x, y) to
+    reg_logistic_regression(y, tx, ...), so the label vector was being used as
+    the design matrix. Crashed with a shape mismatch of 321 vs 210,006.
+
+8b. train_fn returned the (w, loss) tuple, which was then handed to predict_fn
+    as if it were the weight vector.
+
+8c. cross_validate returns a dict keyed by fold index; the caller was reading
+    result["f1_score"], which does not exist. Needed the mean of f1_score_test
+    across folds.
+
+8d. main() fed raw features into logistic regression - no preprocessing (so NaNs
+    made every gradient NaN) and no label encoding (labels were {-1,1} where the
+    logistic gradient requires {0,1}).
+
+8e. compute_logistic_gradient had an operator-precedence bug costing 8.6x in
+    runtime. See section 9.
+
+8f. generate_predictions was a `pass` stub and main() never refitted on the full
+    training set or wrote a submission file.
+
+8g. OPEN: sigmoid's docstring claims numerical stability but the implementation
+    is 1/(1+exp(-z)), which overflows for large negative z and emits a
+    RuntimeWarning on every run. The returned value is still correct
+    (exp -> inf -> 1/inf -> 0), so this is cosmetic, but the docstring is wrong.
+
+
+--------------------------------------------------------------------------------
+9. PERFORMANCE
+--------------------------------------------------------------------------------
+
+Relevant to the report only as a footnote, but it is why the experiments above
+were feasible at all.
+
+compute_logistic_gradient was written as:
+
+    (1/len(y)) * tx.T @ (sigmoid(tx@w) - y)
+
+In Python, * and @ have EQUAL precedence and bind left to right, so this
+evaluates ((1/len(y)) * tx.T) first - materializing a fresh 363 MB scaled copy of
+the transposed design matrix on every single iteration, 500 times per fit.
+Writing it as tx.T @ (...) / len(y) is identical mathematically (max absolute
+difference 1.9e-16) and 8.6x faster.
+
+Measured on a 262,508 x 173 fold:
+
+  (scalar * tx.T) @ residual, float64   295.8 ms/iter   147.9 s per fit
+  tx.T @ residual / N,        float64    34.5 ms/iter    17.2 s per fit
+  tx.T @ residual / N,        float32    16.8 ms/iter     8.4 s per fit
+
+For a 26-fit grid that is 64 minutes -> 7.5 minutes -> 3.6 minutes. The float32
+change is NOT yet applied; it needs the weights and labels narrowed too, or numpy
+silently upcasts the matrix back and the benefit is lost.
+
+Other costs on the same fold: fit_preprocessor 3.1 s, transform_features 2.8 s.
+These are currently recomputed for every (lambda, fold) pair although they do not
+depend on lambda - with 5 lambdas that is about 2 minutes of redundant work.
+
+The workload is memory-bandwidth-bound (about 21 GB/s effective here), so a
+discrete GPU would be 17-50x faster on the same code via CuPy. Not usable for the
+graded implementations.py, which must stay numpy-only.
+
+
+--------------------------------------------------------------------------------
+10. VALIDATION METHODOLOGY - CHECKED AND SOUND
+--------------------------------------------------------------------------------
+
+Verified on the full training set, so these can be stated in the report:
+
+- All 5 folds select exactly the same 172 columns as a fit on the entire training
+  set would. Feature selection is not drifting between folds, so the weight
+  vectors are comparable and the CV estimate is not averaging over structurally
+  different models.
+- Fitted statistics shift only slightly between a fold and the full fit: median
+  6.1%, mean 0.9%, std 11.3% relative.
+- The 5 validation folds partition the data exactly, every row used once.
+- A preprocessing state fitted on all of x_train transfers cleanly to the
+  competition test set: no kept column is more than 50% NaN there (worst is
+  48.8%), and none becomes constant after imputation.
+- CV is mildly PESSIMISTIC, since each fold trains on 262k rows while the
+  submitted model trains on all 328k. That is the right direction for a bias.
+
+One caveat: the pipeline currently runs with train_ratio=1, so there is no
+held-out set at all and hyperparameters are chosen on CV with the leaderboard as
+the only external check. Repeated submissions against the leaderboard will
+eventually overfit it. Keeping a held-out 10-20% for a single final sanity check
+would be more defensible.
+
+
+--------------------------------------------------------------------------------
+11. RECOMMENDED NEXT STEPS, IN ORDER OF EXPECTED VALUE
+--------------------------------------------------------------------------------
+
+1. DONE - sentinel recoding from the codebook (sections 6c, 6e). +0.016 CV F1.
+
+2. ADD lambda=0.0 TO THE GRID. It is currently missing: run.py sweeps
+   [0.1, 0.2, 0.5, 0.7, 0.9, 0.95, 1.0, 2.0, 5.0], so the best setting cannot be
+   found. lambda=0 with threshold 0.19 is worth roughly +0.01 over lambda=1 with
+   threshold 0.4, and the large lambdas can be deleted outright.
+
+3. Sweep the threshold finely (50+ points between 0.05 and 0.6) instead of the
+   current 8 values. Free, because the threshold plays no part in training.
+
+4. One-hot encode ONLY the categorical levels with >=1% support, which avoids the
+   conditioning blow-up of section 7a. This is the most plausible route to a
+   further real gain, since 97 columns are currently misrepresented as magnitudes.
+
+5. Apply the float32 change and stop recomputing preprocessing per lambda, to
+   make iteration cheap enough to try more ideas.
+
+6. Convergence: the loss was still decreasing at 500 iterations. Run the final
+   model much longer at gamma=1.0.
+
+Explicitly NOT worth more effort: lambda grids, class balancing, quadratic terms,
+per-column refused flags. All measured, all neutral or harmful.

@@ -95,4 +95,6 @@ def compute_logistic_loss(y, tx, w):
 
 def compute_logistic_gradient(y, tx, w):
     """Return the gradient of the unregularized logistic loss."""
-    return (1/len(y)) * tx.T @ (sigmoid(tx@w) -y)
+    # divide the D-vector at the end: `(1/len(y)) * tx.T` would bind first and copy
+    # the whole design matrix once per iteration.
+    return tx.T @ (sigmoid(tx@w) - y) / len(y)

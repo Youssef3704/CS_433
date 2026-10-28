@@ -35,6 +35,12 @@ def load_csv_data(data_path, sub_sample=False):
     return x_train, x_test, y_train, train_ids, test_ids
 
 
+def load_feature_names(data_path):
+    """Return the x_train column names, without the leading Id column."""
+    with open(os.path.join(data_path, "x_train.csv")) as f:
+        return np.array(next(csv.reader(f))[1:])
+
+
 def create_csv_submission(ids, y_pred, name):
     """
     This function creates a csv file named 'name' in the format required for a submission in Kaggle or AIcrowd.
@@ -64,6 +70,6 @@ def batch_iter(y, tx, batch_size, num_batches=1, shuffle=True):
 
 
 
-def predict_labels(weights, data):
+def predict_labels_logistic(weights, data, threshold = 0.5):
     """Return {-1, 1} labels from linear scores."""
-    return np.where(sigmoid(data@weights) >= 0.15, 1, -1)
+    return np.where(sigmoid(data@weights) >= threshold, 1, -1)

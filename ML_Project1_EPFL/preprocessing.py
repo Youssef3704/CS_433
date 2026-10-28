@@ -1,27 +1,105 @@
 """Data preparation and feature construction stubs. Fit transformations on training data only."""
 import numpy as np
 
-def fit_preprocessor(x_train):
-    """Return preprocessing state, including learned imputations, scaling and feature selection."""
-    x = np.asanyarray(x_train, dtype=np.float64)
+from ML_Project1_EPFL.brfss_codebook import SENTINEL_CODES_BY_COLUMN
+
+# Survey administration variables: record identifiers, sampling-design weights, interview
+# dates and the telephone screening questions. None of them describe the respondent, and
+# as standardized magnitudes they are noise. _STATE is here because it is a FIPS code, so
+# its ordering is meaningless; it would need one-hot encoding to be usable.
+METADATA_COLUMNS = (
+    "SEQNO", "_PSU", "_STSTR", "_STRWT", "_RAWRAKE", "_WT2RAKE", "_LLCPWT", "_DUALUSE",
+    "IDATE", "IMONTH", "IDAY", "IYEAR", "FMONTH", "DISPCODE",
+    "CTELENUM", "CTELNUM1", "CELLFON3", "CELLFON2", "PVTRESD1", "PVTRESD2",
+    "COLGHOUS", "CCLGHOUS", "LADULT", "STATERES", "LANDLINE",
+    "QSTVER", "QSTLANG", "_STATE",
+)
+
+
+def build_sentinel_plan(feature_names):
+    """Return {column index: sentinel codes} from the BRFSS codebook table.
+
+    The codebook marks "don't know" and "refused" with a code just above each
+    variable's valid range, and the code differs per variable: 7/9 for GENHLTH,
+    77/99 for the 0-30 day counts, 7777/9999 for WEIGHT2, 3 for _AGE65YR. Left in
+    place they reach the model as magnitudes - a GENHLTH refusal standardizes to
+    +5.8, where the fitted log-odds slope extrapolates to a predicted risk of 88%
+    against an observed 14%.
+    """
+    return {c: np.array(SENTINEL_CODES_BY_COLUMN[name], dtype=np.float64)
+            for c, name in enumerate(feature_names)
+            if name in SENTINEL_CODES_BY_COLUMN}
+
+
+def sentinel_mask(x, plan):
+    """Boolean mask of the cells holding one of a column's sentinel codes."""
+    mask = np.zeros(x.shape, dtype=bool)
+    for c, codes in plan.items():
+        mask[:, c] = np.isin(x[:, c], codes)
+    return mask
+
+
+def response_counts(x, mask, keep_idx):
+    """Per row: how many kept answers were refused, and how many were never asked.
+
+    Recoding a sentinel to missing deliberately erases it from its own column, so
+    these two columns are what is left of the distinction between a respondent who
+    declined to answer and a question that was never put to them.
+    """
+    return np.column_stack([mask[:, keep_idx].sum(axis=1),
+                            np.isnan(x[:, keep_idx]).sum(axis=1)]).astype(np.float64)
+
+
+def fit_preprocessor(x_train, feature_names=None):
+    """Return preprocessing state, including learned scaling and feature selection.
+
+    Sentinel codes are recoded as missing first, since that changes which columns
+    pass the missingness filter. A column is then dropped when it is more than half
+    missing, when it carries no variance, or when feature_names identifies it as
+    survey metadata. The mean and standard deviation are taken over the observed
+    values only, so that transform_features can leave missing entries at zero.
+
+    Passing feature_names is what enables the codebook recoding and the metadata
+    filter; without the column names neither is possible.
+    """
+    x = np.array(x_train, dtype=np.float64, copy=True)
+    plan = build_sentinel_plan(feature_names) if feature_names is not None else {}
+    mask = sentinel_mask(x, plan)
+    x[mask] = np.nan
     keep = np.isnan(x).mean(axis=0) <= 0.5
-    x = x[:, keep]
-    median=np.nanmedian(x, axis=0)
-    x = np.where(np.isnan(x), median, x)
-    mean, std = x.mean(axis=0), x.std(axis=0)
+    if feature_names is not None:
+        keep &= ~np.isin(feature_names, METADATA_COLUMNS)
+    keep_idx = np.flatnonzero(keep)
+    mean, std = np.nanmean(x[:, keep_idx], axis=0), np.nanstd(x[:, keep_idx], axis=0)
     nonconst = std > 0
+    keep_idx = keep_idx[nonconst]
+    counts = response_counts(np.asarray(x_train, dtype=np.float64), mask, keep_idx)
+    count_std = counts.std(axis=0)
     return {
-        "keep_idx": np.flatnonzero(keep)[nonconst],
-        "median": median[nonconst],
+        "keep_idx": keep_idx,
+        "sentinels": plan,
         "mean": mean[nonconst],
         "std": std[nonconst],
+        "count_mean": counts.mean(axis=0),
+        "count_std": np.where(count_std > 0, count_std, 1.0),
     }
 
 def transform_features(x, state):
-    """Apply the fitted preprocessing state and return the transformed features."""
-    x = np.asarray(x, dtype=np.float64)[:, state["keep_idx"]]
-    x = np.where(np.isnan(x), state["median"], x)
-    return add_intercept((x - state["mean"]) / state["std"])
+    """Apply the fitted preprocessing state and return the transformed features.
+
+    Missing entries end up at exactly zero, i.e. at the training mean of their own
+    column, so they contribute nothing to the linear score. Imputing a raw zero
+    before standardizing would instead place them outside the valid range of most
+    of these variables.
+    """
+    x = np.array(x, dtype=np.float64)
+    mask = sentinel_mask(x, state["sentinels"])
+    counts = response_counts(x, mask, state["keep_idx"])
+    x[mask] = np.nan
+    z = (x[:, state["keep_idx"]] - state["mean"]) / state["std"]
+    z[np.isnan(z)] = 0.0
+    counts = (counts - state["count_mean"]) / state["count_std"]
+    return np.concatenate([add_intercept(z), counts], axis=1)
 
 
 def add_intercept(x):
