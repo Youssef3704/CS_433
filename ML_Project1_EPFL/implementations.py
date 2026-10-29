@@ -35,7 +35,6 @@ def mean_squared_error_sgd(y, tx, initial_w, max_iters, gamma):
 
 def least_squares(y, tx):
     """Return (w, loss) using normal equations; do not use numpy.linalg.lstsq."""
-    #pass
     A = tx.T @ tx
     b = tx.T @ y
     w = np.linalg.solve(A, b)
@@ -44,7 +43,6 @@ def least_squares(y, tx):
 
 def ridge_regression(y, tx, lambda_):
     """Return (w, loss) using regularized normal equations; returned MSE excludes penalty."""
-    #pass
     N, D = tx.shape
     A = tx.T @ tx + 2 * N * lambda_ * np.eye(D)
     b = tx.T @ y 
@@ -84,7 +82,9 @@ def compute_mse_gradient(y, tx, w):
 
 def sigmoid(z):
     """Return the sigmoid of z using a numerically stable calculation."""
-    return 1 / (1 + np.exp(-z))
+    # 1 / (1 + exp(-z)) overflows for large negative z; log(1 + exp(-z)) via
+    # logaddexp does not, and exp(-that) is the same value.
+    return np.exp(-np.logaddexp(0, -z))
 
 
 def compute_logistic_loss(y, tx, w):

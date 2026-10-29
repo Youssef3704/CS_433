@@ -1,7 +1,7 @@
-"""Data preparation and feature construction stubs. Fit transformations on training data only."""
+"""Data preparation and feature construction. Every statistic is fitted on training rows only."""
 import numpy as np
 
-from ML_Project1_EPFL.brfss_codebook import SENTINEL_CODES_BY_COLUMN
+from brfss_codebook import SENTINEL_CODES_BY_COLUMN
 
 # Survey administration variables: record identifiers, sampling-design weights, interview
 # dates and the telephone screening questions. None of them describe the respondent, and
@@ -50,7 +50,8 @@ def response_counts(x, mask, keep_idx):
                             np.isnan(x[:, keep_idx]).sum(axis=1)]).astype(np.float64)
 
 
-def fit_preprocessor(x_train, feature_names=None):
+def fit_preprocessor(x_train, feature_names=None, recode_sentinels=True,
+                     drop_metadata=True, add_counts=True):
     """Return preprocessing state, including learned scaling and feature selection.
 
     Sentinel codes are recoded as missing first, since that changes which columns
@@ -60,14 +61,16 @@ def fit_preprocessor(x_train, feature_names=None):
     values only, so that transform_features can leave missing entries at zero.
 
     Passing feature_names is what enables the codebook recoding and the metadata
-    filter; without the column names neither is possible.
+    filter; without the column names neither is possible. The three switches exist
+    for the ablation study and are all on in the submitted model.
     """
     x = np.array(x_train, dtype=np.float64, copy=True)
-    plan = build_sentinel_plan(feature_names) if feature_names is not None else {}
+    use_names = feature_names is not None
+    plan = build_sentinel_plan(feature_names) if use_names and recode_sentinels else {}
     mask = sentinel_mask(x, plan)
     x[mask] = np.nan
     keep = np.isnan(x).mean(axis=0) <= 0.5
-    if feature_names is not None:
+    if use_names and drop_metadata:
         keep &= ~np.isin(feature_names, METADATA_COLUMNS)
     keep_idx = np.flatnonzero(keep)
     mean, std = np.nanmean(x[:, keep_idx], axis=0), np.nanstd(x[:, keep_idx], axis=0)
@@ -82,7 +85,9 @@ def fit_preprocessor(x_train, feature_names=None):
         "std": std[nonconst],
         "count_mean": counts.mean(axis=0),
         "count_std": np.where(count_std > 0, count_std, 1.0),
+        "add_counts": add_counts,
     }
+
 
 def transform_features(x, state):
     """Apply the fitted preprocessing state and return the transformed features.
@@ -98,6 +103,8 @@ def transform_features(x, state):
     x[mask] = np.nan
     z = (x[:, state["keep_idx"]] - state["mean"]) / state["std"]
     z[np.isnan(z)] = 0.0
+    if not state["add_counts"]:
+        return add_intercept(z)
     counts = (counts - state["count_mean"]) / state["count_std"]
     return np.concatenate([add_intercept(z), counts], axis=1)
 

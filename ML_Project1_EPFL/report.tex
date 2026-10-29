@@ -1,19 +1,230 @@
-\documentclass[10pt,a4paper]{article}
-\usepackage[margin=2cm]{geometry}
-\title{ML Project 1 -- EPFL}
-\author{Team members}
-\date{}
+\documentclass[10pt,conference]{IEEEtran}
+\usepackage[T1]{fontenc}
+\usepackage{mathptmx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\tbd}[1]{\textcolor{red}{#1}}
+
 \begin{document}
+\title{Predicting Heart Disease from Survey Answers:\\
+the Codebook Matters More than the Regularizer}
+
+\author{
+  \IEEEauthorblockN{Youssef Bensalem, Youssef Masmoudi, Ilias Sokolis}
+  \IEEEauthorblockA{CS-433 Machine Learning, EPFL, Fall 2026}
+}
+
 \maketitle
+
+\begin{abstract}
+We predict coronary heart disease (MICHD) for 328,135 respondents of the 2015
+BRFSS telephone survey from their 321 self-reported answers, using logistic
+regression trained by gradient descent and scored by F1. Cross-validation shows
+that the model cannot overfit ($N/D \approx 2{,}100$), so L2 regularization only
+hurts, and the decisive choices are the decision threshold and how answers are
+encoded. BRFSS stores ``don't know'' and ``refused'' as per-variable numeric
+codes that a linear model reads as extreme values; recoding them to missing with
+the official codebook is the single representation change that helps
+($+0.013$ CV F1). Our final model reaches a 5-fold CV F1 of 0.425.
+We also report three negative results: one-hot encoding, squared features and
+class rebalancing.
+\end{abstract}
+
 \section{Introduction}
-% TODO: State the task and motivation.
-\section{Data and preprocessing}
-% TODO: Describe exploratory analysis, cleaning and feature engineering.
-\section{Methods and validation}
-% TODO: Describe baselines, hyperparameters, seeds and validation strategy.
+The task is binary classification with a strong imbalance: 8.83\% of training
+rows are positive. Accuracy is therefore useless (predicting ``healthy'' for
+everyone scores 91\%), and the competition metric is the F1 score of the
+positive class. Predicting \emph{everyone} positive already gives
+F1~$=2p/(1+p)=0.162$, which is the floor any model has to beat. Every feature is
+a questionnaire answer: there are no lab values, and 44.7\% of all cells are
+missing, mostly because of the survey's skip logic.
+
+Only NumPy is allowed, so we stay with linear models and spend the effort on
+validation and on how the answers are represented. All full-data results are
+reproduced by \texttt{run.py} and \texttt{ablation.py} in our repository.
+
+\section{Preprocessing}
+\label{sec:prep}
+Every statistic below is fitted inside each training fold only.
+
+\textbf{1. Sentinel codes $\to$ missing.} BRFSS codes a non-answer just above each
+variable's valid range, and the code differs per variable: 7/9 for
+\texttt{GENHLTH} (scale 1--5), 77/99 for the 0--30 day counts (where 7 and 9 are
+real answers), 7777/9999 for weight in pounds, 3 for \texttt{\_AGE65YR}, 14 for
+\texttt{\_AGEG5YR}. Left in place, these codes are read as magnitudes.
+Fitting logistic regression on \texttt{GENHLTH} alone gives a slope of $+0.80$
+per standard deviation, i.e.\ the odds are multiplied by 2.2 per step. A
+refusal (9) standardizes to $+5.8\sigma$, 3.6$\sigma$ beyond the worst real
+answer, where the model predicts an 88\% risk against an observed 14\%. The
+observed risk rises from 1 to 5 and then \emph{falls} at 7 and 9, a shape no
+single coefficient can fit. We took the codes of 242 of the 321 columns from the
+official CDC 2015 SAS format files~\cite{brfss} (\texttt{brfss\_codebook.py}).
+We first tried to infer them from the data (``a code is a sentinel if the value
+below it never occurs''), but this rule cannot find \texttt{\_AGE65YR}$=3$ or
+\texttt{\_AGEG5YR}$=14$, which follow their real values without a gap, and a
+cruder ``7 and 9 are sentinels'' rule would have erased real day counts.
+
+\textbf{2. Column filtering.} We drop columns that are more than 50\% missing
+after step~1, constant columns, and 28 survey administration columns (record
+numbers, sampling weights, interview dates, telephone screening, and the state
+FIPS code, whose numeric order is meaningless). 152 columns remain.
+
+\textbf{3. Standardization, then missing $\to 0$.} Each column is centred and
+scaled with the mean and standard deviation of its \emph{observed} values;
+missing entries are then set to 0. After centring, 0 is the column mean, so a
+missing answer adds nothing to the score $w^\top z$. Any other value is a claim
+about where the respondent sits on the health axis. Imputing a raw 0 before
+scaling would be wrong, because 0 lies outside the valid range of most answers.
+
+\textbf{4. Two counts and an intercept.} Recoding a refusal to missing merges
+it with ``never asked''. To keep the distinction we add, per row, the
+standardized number of refused answers and of questions never asked. Rows
+with at least three refusals are 10.4\% positive, compared with 4.7\% for rows
+with none. Together with the intercept this gives $D=155$.
+
+\section{Models and Validation}
+\textbf{Methods.} We implemented the six required methods (MSE by gradient
+descent and SGD, least squares and ridge by normal equations, logistic and
+L2-regularized logistic regression by gradient descent), all checked against
+the course's reference values. Least squares on $\{0,1\}$ labels serves as
+a baseline. The final model is logistic regression trained by full-batch
+gradient descent from $w=0$.
+
+\textbf{Step size and iterations.} After 500 steps the training loss is 0.2292
+for $\gamma=0.1$ and 0.2258 for $\gamma=1$, and gradient descent diverges for
+$\gamma\ge 5$ (loss 0.697, above the 0.693 of $w=0$). We use $\gamma=1$ and 500
+iterations. On a held-out 20\%, 4000 iterations change validation F1 by only
+$+0.001$, and validation loss is lowest at 500.
+
+\textbf{Cross-validation.} We use 5 folds (seed 1). Preprocessing is refitted
+inside every training fold, so no validation row influences it; all five folds
+keep exactly the same columns as a fit on the full data. The decision
+threshold plays no part in training, so we cache each fold's validation
+probabilities and sweep 56 thresholds from 0.05 to 0.60 in steps of 0.01 at no
+extra cost. We select the $(\lambda,\text{threshold})$ pair with the best mean
+validation F1, then refit preprocessing and weights on all training rows. The
+CV estimate is slightly pessimistic, because each fold trains on 80\% of the
+data. It is also a good predictor of the leaderboard: an earlier configuration
+scored 0.393 in CV (on a 10\% subsample) and 0.403 on AIcrowd.
+
 \section{Results}
-% TODO: Report metrics, baseline comparisons and ablation results.
-\section{Conclusion}
-% TODO: Summarize findings and limitations.
-% Maximum 2 pages; references may occupy an additional third page.
+Table~\ref{tab:ablation} adds one change at a time, on the full training set
+with the same five folds. Figure~\ref{fig:thr} shows F1 as a function of the
+threshold.
+
+\begin{table}[t]
+\centering
+\caption{Ablation on the full training set, 5-fold CV, mean $\pm$ std over
+folds. Each logistic row adds one change to the row above. $\bar p$ is the mean
+predicted probability; the base rate is 0.0883.}
+\label{tab:ablation}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcccc}
+\toprule
+Configuration & $D$ & CV F1 & thr. & $\bar p$ \\
+\midrule
+Predict all positive & -- & 0.162 & -- & -- \\
+Least squares, final features & 155 & $0.416\pm0.004$ & 0.21 & -- \\
+\midrule
+Logistic, $\gamma{=}0.1$, $\lambda{=}1$, all columns & 173 & $0.380\pm0.004$ & 0.50 & 0.455 \\
++ $\lambda=0$ & 173 & $0.408\pm0.003$ & 0.21 & 0.098 \\
++ $\gamma=1$ & 173 & $0.412\pm0.003$ & 0.20 & 0.088 \\
++ drop survey metadata & 154 & $0.412\pm0.003$ & 0.20 & 0.088 \\
++ sentinels $\to$ missing & 153 & $0.425\pm0.005$ & 0.20 & 0.088 \\
++ refused / never-asked counts & 155 & $\mathbf{0.425\pm0.005}$ & 0.20 & 0.088 \\
+\midrule
+Final model, threshold 0.5 & 155 & $0.226\pm0.005$ & 0.50 & 0.088 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{threshold_f1.pdf}
+\caption{5-fold CV F1 against the decision threshold (full training set).}
+\label{fig:thr}
+\end{figure}
+
+\textbf{The threshold is the largest single lever.} The final model scores
+0.226 at the default threshold of 0.5 and 0.425 at 0.20. For a calibrated
+classifier, the F1-optimal threshold is half the achievable F1~\cite{lipton},
+here $0.425/2 \approx 0.21$, which is close to the 0.20 we select.
+
+\textbf{Regularization does not help.} With $N/D\approx 2{,}100$ there is
+almost no variance for L2 to control, and the CV and leaderboard scores agree,
+so there is no overfitting to fix. Removing $\lambda=1$ is worth $+0.028$
+(Table~\ref{tab:ablation}). Shrinking $w$, intercept included, pulls every
+probability towards $\sigma(0)=0.5$: the regularized model has $\bar p=0.455$
+and its best threshold is 0.5. This explains why our earlier submission
+needed a threshold of 0.4. At $\lambda=0$, $\bar p$ equals the base rate, so
+the model is calibrated. The grid in \texttt{run.py} gives CV F1
+0.4248, 0.4252 and 0.4208 for $\lambda = 0$, 0.001 and 0.01. The selection rule
+picks $\lambda=0.001$, but its lead is ten times smaller than the fold standard
+deviation, so in practice $\lambda=0$ and $\lambda=0.001$ are equivalent. Larger values could not be tested at $\gamma=1$: each step
+multiplies $w$ by $(1-2\gamma\lambda)$, so $\lambda=1$ gives the update
+$w\leftarrow -w-\nabla L$, and $\lambda=0.1$ already oscillates (CV F1 0.16).
+At $\gamma=0.1$ on a 10\% subsample, F1 fell steadily from 0.402
+($\lambda=0$) to 0.393 ($\lambda=0.1$) and 0.341 ($\lambda=5$).
+Increasing $\gamma$ from 0.1 to 1 adds $+0.004$, because 500 steps of
+$\gamma=0.1$ have not converged ($\bar p=0.098$).
+
+
+\textbf{Sentinel recoding is the representation change that helps.}
+Dropping the metadata columns is neutral, which we expected: it is a
+correctness fix, since record numbers and sampling weights carry no
+information about the respondent. Recoding the sentinels adds $+0.013$, about
+three times the fold standard deviation.
+How the codes are neutralized matters. Excluding them from the mean and
+standard deviation while still passing the raw value is catastrophic (CV F1
+0.22 on a 10\% subsample, against 0.40 when they are left untouched): the
+codes had been inflating $\sigma$ and so compressing themselves, and without
+them they land even further out. Adding one ``refused'' indicator per column
+(264 columns, on the subsample) gains nothing, and neither do the two counts
+($+0.00002$). The association between refusals and the outcome is real, but it
+is already explained by covariates such as age and general health.
+
+\textbf{Negative results} (10\% subsample). \emph{(i) One-hot encoding}
+the 97 kept columns that are categorical codes with 3--10 levels (772--1,062
+columns) \emph{lowered} CV F1 to 0.20--0.27, even after 3000 iterations. The
+cause is conditioning, not overfitting: a standardized dummy for a level held
+by 0.1\% of rows takes the values $-0.03$ and $+31.6$, and gradient descent
+with one step size cannot converge along such directions. The best threshold
+sat at the bottom of the sweep and $\bar p$ far below the base rate.
+\emph{(ii) Squared features} failed for the same reason (0.32--0.37).
+\emph{(iii) Undersampling negatives} to 1:1, 2:1, 4:1 and 8:1 gave 0.355,
+0.374, 0.392 and 0.402, against 0.402 without it, while the best threshold
+moved from 0.70 to 0.24. Rebalancing a calibrated model only shifts its
+optimal threshold~\cite{elkan}.
+
+\section{Discussion}
+Our final model ($\lambda=0.001$, threshold 0.20) reaches a 5-fold CV F1 of
+0.425. Its submission
+(\texttt{run.py}) scores \tbd{0.4xx} on AIcrowd, up from 0.403 for our
+previous best ($\lambda=1$, threshold 0.4, no sentinel recoding).
+Since there is no overfitting, the remaining gap to the best teams
+($\approx0.45$) has to come from representation, not regularization. The clearest
+candidate is one-hot encoding restricted to levels with at least 1\% support,
+which keeps the problem well conditioned, or a second-order optimizer that is
+insensitive to conditioning. Two limitations apply. Both the features and the
+label are self-reported, so the model predicts a \emph{reported} diagnosis.
+Hyperparameters were also chosen by CV with the leaderboard as the only
+external check, so we kept the number of submissions small.
+
+\begin{thebibliography}{1}
+\bibitem{brfss} Centers for Disease Control and Prevention, ``Behavioral Risk
+Factor Surveillance System, 2015 codebook and SAS format files
+(\texttt{Formas15.sas}, \texttt{Format15.sas}),''
+\url{https://www.cdc.gov/brfss/annual_data/annual_2015.html}.
+\bibitem{lipton} Z.~C. Lipton, C.~Elkan, and B.~Narayanaswamy, ``Optimal
+thresholding of classifiers to maximize F1 measure,'' in \emph{ECML PKDD},
+2014, pp.~225--239.
+\bibitem{elkan} C.~Elkan, ``The foundations of cost-sensitive learning,'' in
+\emph{IJCAI}, 2001, pp.~973--978.
+\end{thebibliography}
+
 \end{document}

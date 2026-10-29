@@ -1,9 +1,9 @@
-"""Helper stubs; these are placeholders, not the official EPFL helper implementation."""
+"""Data loading, submission writing and prediction helpers."""
 import numpy as np
 import os
 import csv
 
-from ML_Project1_EPFL.implementations import sigmoid
+from implementations import sigmoid
 
 
 def load_csv_data(data_path, sub_sample=False):
@@ -62,12 +62,6 @@ def create_csv_submission(ids, y_pred, name):
         writer.writeheader()
         for r1, r2 in zip(ids, y_pred):
             writer.writerow({"Id": int(r1), "Prediction": int(r2)})
-
-
-def batch_iter(y, tx, batch_size, num_batches=1, shuffle=True):
-    """Yield batches of labels and features; SGD must use batch_size=1."""
-    indices = np.random.permutation(len(y))
-
 
 
 def predict_labels_logistic(weights, data, threshold = 0.5):

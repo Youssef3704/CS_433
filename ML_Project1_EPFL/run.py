@@ -1,140 +1,111 @@
-"""Reproducible training and submission pipeline stubs."""
+"""Reproduce the final submission: cross-validate, refit on all training rows, predict.
+
+Usage (from this folder, with x_train.csv, y_train.csv and x_test.csv in data/):
+
+    python run.py [--data-path data] [--output submission.csv]
+
+Every step is deterministic (fixed fold seed, zero initial weights, full-batch
+gradient descent), so the same data always yields the same submission file.
+"""
+import argparse
 import time
 
-from ML_Project1_EPFL.helpers import (load_csv_data, load_feature_names,
-                                      predict_labels_logistic, create_csv_submission)
-from ML_Project1_EPFL.implementations import logistic_regression, reg_logistic_regression, sigmoid
-from ML_Project1_EPFL.preprocessing import fit_preprocessor, transform_features, encode_labels
 import numpy as np
 
-from ML_Project1_EPFL.validation import split_data, compute_accuracy, compute_f1, cross_validate
+from helpers import (load_csv_data, load_feature_names,
+                     predict_labels_logistic, create_csv_submission)
+from implementations import reg_logistic_regression, sigmoid
+from preprocessing import fit_preprocessor, transform_features, encode_labels
+from validation import compute_f1, cross_validate
+
+GAMMA = 1.0         # largest stable step: 5.0 already diverges
+MAX_ITERS = 500
+# Each step multiplies w by (1 - 2 * GAMMA * lambda), and GAMMA = 1 already sits near
+# the stability limit of the loss itself: lambda = 0.1 oscillates, and at lambda = 1
+# the update is w <- -w - gradient. Larger lambdas need a smaller step (trials.txt).
+LAMBDAS = (0.0, 0.001, 0.01)
+THRESHOLDS = np.round(np.arange(0.05, 0.605, 0.01), 2)
+K_FOLD = 5
+SEED = 1
 
 
-def train_model(y, tx):
-    """Train the selected model with the chosen hyperparameters and return weights."""
+def fit_fold(x, y, feature_names, lambdas=LAMBDAS, gamma=GAMMA, max_iters=MAX_ITERS,
+             **preprocessing_options):
+    """Fit preprocessing on one training fold, then one weight vector per lambda.
+
+    The preprocessing does not depend on lambda, so it is fitted once and shared.
+    Returns ({lambda: weights}, preprocessing_state).
+    """
+    state = fit_preprocessor(x, feature_names, **preprocessing_options)
+    tx = transform_features(x, state)
+    weights = {lambda_: reg_logistic_regression(y, tx, lambda_, np.zeros(tx.shape[1]),
+                                                max_iters, gamma)[0]
+               for lambda_ in lambdas}
+    return weights, state
 
 
+def cross_validated_probabilities(x, y, train_fn, output_fn=sigmoid):
+    """Return one (y_valid, {lambda: probabilities}) pair per validation fold.
 
-def generate_predictions(x_test, weights, preprocessing_state, threshold=0.5):
-    """Transform test features and return competition labels {-1, 1}."""
-    tx_test = transform_features(x_test, preprocessing_state)
-    return predict_labels_logistic(weights, tx_test, threshold)
+    The threshold plays no part in training, so the probabilities are stored once
+    and re-thresholded as often as needed. output_fn maps the linear score to the
+    thresholded quantity (the identity for a regression baseline).
+    """
+    folds = cross_validate(x, y, train_fn, k_fold=K_FOLD, seed=SEED)
+    result = []
+    for fold in folds.values():
+        weights, state = fold["model"]
+        tx_valid = transform_features(x[fold["valid_idx"]], state)
+        result.append((y[fold["valid_idx"]],
+                       {lambda_: output_fn(tx_valid @ w) for lambda_, w in weights.items()}))
+    return result
+
+
+def f1_grid(fold_probabilities, lambda_, thresholds=THRESHOLDS):
+    """Return the per-fold F1 at every threshold, shape (K_FOLD, len(thresholds))."""
+    return np.array([[compute_f1(y_valid, (probabilities[lambda_] >= t).astype(int))
+                      for t in thresholds]
+                     for y_valid, probabilities in fold_probabilities])
 
 
 def main():
-    """Load data, fit preprocessing, train the model, and write the submission CSV."""
-    print("Started")
+    """Load data, select lambda and threshold by CV, refit, and write the submission."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--data-path", default="data")
+    parser.add_argument("--output", default="submission.csv")
+    args = parser.parse_args()
 
-    #load data
-    x_train_ai_crowd, x_test_aicrowd, y_train_ai_crowd, train_ids, test_ids = load_csv_data("data/81fdc2af-6811-4089-9054-9d59f417f819_dataset/dataset")
-    # column names, so the preprocessor can drop the survey metadata by name
-    feature_names = load_feature_names("data/81fdc2af-6811-4089-9054-9d59f417f819_dataset/dataset")
-
-    x_train, x_test, y_train, y_test = split_data(x_train_ai_crowd, y_train_ai_crowd, 1)
-
+    x_train, x_test, y_train, _, test_ids = load_csv_data(args.data_path)
+    # column names, so the preprocessor can find the codebook sentinels and the metadata
+    feature_names = load_feature_names(args.data_path)
     # the logistic gradient expects labels in {0, 1}, not the {-1, 1} of the competition
     y_train = encode_labels(y_train)
+    print(f"Loaded {x_train.shape[0]} training rows, {x_train.shape[1]} raw features")
 
-    #now let's do some cross validation with regularized logistic regression seeing lambdas and thresholds
+    start = time.time()
+    fold_probabilities = cross_validated_probabilities(
+        x_train, y_train, lambda x, y: fit_fold(x, y, feature_names))
+    print(f"{K_FOLD}-fold CV, {len(LAMBDAS)} lambdas fitted in {time.time() - start:.0f}s")
 
-    lambdas = [0.0,0.1,0.2,0.5,0.7,0.9,0.95,1.0,1.05,1.1]
-    thresholds = [0.1,0.15,0.2,0.3,0.35,0.4,0.42,0.45,0.5]
-
-    f1_scores_array=np.zeros(shape=(len(lambdas),len(thresholds)))
-
-    for i in range(len(lambdas)):
-        # the threshold plays no part in training, so fit each fold once and
-        # score the stored probabilities at every threshold
-        start = time.time()
-        folds = cross_validate(x_train, y_train,
-                               lambda x, y: _fit_logistic_ridge(x, y, lambdas[i], feature_names))
-        print(f"lambda={lambdas[i]} ({i + 1}/{len(lambdas)}): "
-              f"{5} folds fitted in {time.time() - start:.0f}s", flush=True)
-
-        validation_probabilities = []
-        for fold in folds.values():
-            weights, preprocessing_state = fold["model"]
-            valid_idx = fold["valid_idx"]
-            tx_valid = transform_features(x_train[valid_idx], preprocessing_state)
-            validation_probabilities.append((y_train[valid_idx], sigmoid(tx_valid @ weights)))
-
-        for j in range(len(thresholds)):
-            f1_scores_array[i,j]=np.mean([compute_f1(y_true, np.where(probabilities >= thresholds[j], 1, 0))
-                                          for y_true, probabilities in validation_probabilities])
-
-    maximum = np.unravel_index(np.argmax(f1_scores_array, axis=None), f1_scores_array.shape)
-    best_lambda = lambdas[maximum[0]]
-    best_threshold = thresholds[maximum[1]]
-
-    print(f"Cross validated best parameters lambda={best_lambda}, threshold={best_threshold}")
-    print(f"Best f1_score={f1_scores_array[maximum[0],maximum[1]]}")
+    best = (-1.0, None, None)
+    for lambda_ in LAMBDAS:
+        f1 = f1_grid(fold_probabilities, lambda_)
+        j = int(np.argmax(f1.mean(axis=0)))
+        mean_p = np.mean(np.concatenate([p[lambda_] for _, p in fold_probabilities]))
+        print(f"lambda={lambda_:<5} CV F1 {f1.mean(axis=0)[j]:.4f} +- {f1[:, j].std():.4f} "
+              f"@ threshold {THRESHOLDS[j]:.2f}   mean predicted p {mean_p:.4f}")
+        if f1.mean(axis=0)[j] > best[0]:
+            best = (f1.mean(axis=0)[j], lambda_, THRESHOLDS[j])
+    best_f1, best_lambda, best_threshold = best
+    print(f"Selected lambda={best_lambda}, threshold={best_threshold:.2f} (CV F1 {best_f1:.4f})")
 
     # the fold states only existed to score the folds; the preprocessing applied to the
     # test set has to be fitted on the same rows the submitted weights are trained on
-    print("Refitting on the full training set", flush=True)
-    start = time.time()
-    weights, preprocessing_state = _fit_logistic_ridge(x_train, y_train, best_lambda, feature_names)
-    print(f"Refitted in {time.time() - start:.0f}s", flush=True)
-
-    y_pred = generate_predictions(x_test_aicrowd, weights, preprocessing_state, best_threshold)
-    create_csv_submission(test_ids, y_pred, "submission.csv")
-    print(f"Wrote submission.csv: {int(np.sum(y_pred == 1))} of {len(y_pred)} rows predicted positive")
-
-
-def _fit_logistic_ridge(x, y, lambda_, feature_names=None, max_iters=500, gamma=0.1):
-    """Fit preprocessing and regularized logistic regression on one training fold."""
-    preprocessing_state = fit_preprocessor(x, feature_names)
-    tx = transform_features(x, preprocessing_state)
-    weights, _ = reg_logistic_regression(y, tx, lambda_, np.zeros(tx.shape[1]), max_iters, gamma)
-    return weights, preprocessing_state
-
-
-def _simple_logistic_regression(x_train, y_train, x_test, y_test):
-    # we need to split the train and test set into our own sets
-
-    preprocessing_state = fit_preprocessor(x_train)
-
-    x_train_transformed = transform_features(x_train, preprocessing_state)
-    y_train_transformed = encode_labels(y_train)
-
-    x_test_transformed = transform_features(x_test, preprocessing_state)
-    y_test_transformed = encode_labels(y_test)
-
-    print("Loaded data and starting")
-
-    # start with plain old logistic regression
-    weights, loss = logistic_regression(y_train_transformed, x_train_transformed,
-                                        np.zeros(x_train_transformed.shape[1]), 500, 0.1)
-
-    # do predictions
-
-    y_train_pred = encode_labels(predict_labels_logistic(weights, x_train_transformed))
-    y_test_pred = encode_labels(predict_labels_logistic(weights, x_test_transformed))
-
-    accuracy_train = compute_accuracy(y_train_transformed, y_train_pred)
-    f1_score_train = compute_f1(y_train_transformed, y_train_pred)
-
-    print(f"Accuracy train: {accuracy_train}")
-    print(f"F1 score train: {f1_score_train}")
-
-    accuracy_test = compute_accuracy(y_test_transformed, y_test_pred)
-    f1_score_test = compute_f1(y_test_transformed, y_test_pred)
-
-    print(f"Accuracy test: {accuracy_test}")
-    print(f"F1 score test: {f1_score_test}")
-
-    x_train, x_test, y_train, train_ids, test_ids = load_csv_data(
-        "data/81fdc2af-6811-4089-9054-9d59f417f819_dataset/dataset")
-
-    state = fit_preprocessor(x_train)
-    tx_train = transform_features(x_train, state)
-    tx_test = transform_features(x_test, state)
-
-    weights, _ = logistic_regression(encode_labels(y_train), tx_train,
-                                     np.zeros(tx_train.shape[1]), 500, 0.1)
-
-    y_pred = predict_labels_logistic(weights, tx_test, threshold=0.15)  # values in {-1, 1}
-    create_csv_submission(test_ids, y_pred, "submission.csv")
+    weights, state = fit_fold(x_train, y_train, feature_names, lambdas=(best_lambda,))
+    y_pred = predict_labels_logistic(weights[best_lambda], transform_features(x_test, state),
+                                     best_threshold)
+    create_csv_submission(test_ids, y_pred, args.output)
+    print(f"Wrote {args.output}: {int(np.sum(y_pred == 1))} of {len(y_pred)} rows predicted positive")
 
 
 if __name__ == "__main__":

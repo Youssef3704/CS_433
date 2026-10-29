@@ -4,7 +4,7 @@ __pycache__/
 venv/
 .DS_Store
 .ipynb_checkpoints/
-data/
+data
 *.csv
 *.csv.gz
 
